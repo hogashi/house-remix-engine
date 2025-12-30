@@ -2,10 +2,10 @@
   "name": "house-remix-engine",
   "version": "1.0.0",
   "description": "Convert any song into a 126 BPM House track with sidechain pumping and bass management",
-  "main": "house-remix-server.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node house-remix-server.js",
-    "dev": "node house-remix-server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "keywords": [
     "audio",
