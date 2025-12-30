@@ -4,6 +4,8 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const path = require('path');
 const fs = require('fs');
+const MusicTempo = require('music-tempo');
+const { AudioContext } = require('web-audio-api');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -19,50 +21,63 @@ app.get('/', (req, res) => {
 });
 
 /**
+ * HELPER: Automated Beat Mapping
+ * Analyzes an audio buffer to find beat timestamps.
+ */
+const getBeatMap = (buffer) => {
+    return new Promise((resolve, reject) => {
+        const context = new AudioContext();
+        context.decodeAudioData(buffer, (audioBuffer) => {
+            const data = audioBuffer.getChannelData(0); // Use Mono for detection
+            const mt = new MusicTempo(data);
+            // mt.beats is an array of timestamps where beats occur
+            resolve(mt.beats);
+        }, reject);
+    });
+};
+
+/**
  * PRODUCT 1: BPM FIXER (Quantization Engine)
- * This route slices the audio and stretches individual sections to align with the grid.
+ * Now uses REAL beat detection and dynamic slicing.
  */
 app.post('/fix-bpm', upload.single('song'), async (req, res) => {
     const inputPath = req.file.path;
     const targetBpm = parseFloat(req.body.targetBpm) || 126;
     const outputPath = path.join(__dirname, 'remixes', `fixed-${Date.now()}.mp3`);
     
-    // Target duration for one beat at targetBpm
     const targetBeatDuration = 60 / targetBpm;
 
     try {
-        /**
-         * QUANTIZATION LOGIC:
-         * In a production environment, you'd use a peak-detection library here to get actual timestamps.
-         * For this implementation, we demonstrate the 'Dynamic Warp' filter construction.
-         */
-        
-        // Mocking a detected beat map for a song that drifts (Start 120BPM -> End 125BPM)
-        // [time_in_seconds, actual_duration_to_next_beat]
-        // This is where 'music-tempo' or 'aubio' would populate data.
-        const mockBeatMap = [
-            { start: 0, duration: 0.500 }, // 120 BPM segment
-            { start: 0.500, duration: 0.495 },
-            { start: 0.995, duration: 0.490 },
-            { start: 1.485, duration: 0.485 },
-            { start: 1.970, duration: 0.480 }  // Getting closer to 125 BPM
-        ];
+        const fileBuffer = fs.readFileSync(inputPath);
+        const beats = await getBeatMap(fileBuffer);
+
+        if (beats.length < 2) {
+            throw new Error("Could not detect enough beats to quantize.");
+        }
 
         let filterChain = [];
         let concatInputs = [];
 
-        // We loop through the map and create a specific stretch for every segment
-        mockBeatMap.forEach((beat, index) => {
-            const ratio = beat.duration / targetBeatDuration;
-            const label = `v${index}`;
+        // Build a dynamic stretch filter for every detected beat interval
+        for (let i = 0; i < beats.length - 1; i++) {
+            const start = beats[i];
+            const originalDuration = beats[i + 1] - start;
             
+            // Handle edge case where tempo might be too fast/slow for atempo filter (0.5 to 2.0)
+            let ratio = originalDuration / targetBeatDuration;
+            ratio = Math.max(0.5, Math.min(2.0, ratio));
+
+            const label = `b${i}`;
+            
+            // Trim the specific beat
             filterChain.push({
                 filter: 'atrim',
-                options: { start: beat.start, duration: beat.duration },
+                options: { start: start, duration: originalDuration },
                 inputs: '0:a',
                 outputs: `t${label}`
             });
 
+            // Stretch the beat to the grid
             filterChain.push({
                 filter: 'atempo',
                 options: ratio,
@@ -71,9 +86,9 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
             });
 
             concatInputs.push(label);
-        });
+        }
 
-        // Concatenate all fixed segments back together
+        // Stitch the beats back together
         filterChain.push({
             filter: 'concat',
             options: { n: concatInputs.length, v: 0, a: 1 },
@@ -83,7 +98,7 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
         ffmpeg(inputPath)
             .complexFilter(filterChain, 'fixed_audio')
-            .on('start', (cmd) => console.log('Quantizing with dynamic map...'))
+            .on('start', (cmd) => console.log('Quantizing with detected beats...'))
             .on('end', () => {
                 res.download(outputPath, () => {
                     fs.unlinkSync(inputPath);
@@ -93,11 +108,13 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
             .on('error', (err) => {
                 console.error(err);
                 res.status(500).send("Quantization failed: " + err.message);
+                if(fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             })
             .save(outputPath);
 
     } catch (err) {
-        res.status(500).send(err.message);
+        console.error(err);
+        res.status(500).send("Analysis Error: " + err.message);
     }
 });
 
@@ -117,7 +134,6 @@ app.post('/remix', upload.single('song'), async (req, res) => {
         .input(drumPath)
         .inputOptions(['-stream_loop -1'])
         .complexFilter([
-            // Process the input song first (Highpass + Sidechain)
             { filter: 'highpass', options: { f: 200 }, inputs: '0:a', outputs: 'hpf' },
             { 
               filter: 'sidechaincompress', 
@@ -125,7 +141,6 @@ app.post('/remix', upload.single('song'), async (req, res) => {
               inputs: ['hpf', '1:a'], 
               outputs: 'ducked' 
             },
-            // Layer the house drums on top
             { filter: 'amix', options: { inputs: 2, duration: 'first' }, inputs: ['ducked', '1:a'] }
         ])
         .audioBitrate('192k')
@@ -139,4 +154,5 @@ app.post('/remix', upload.single('song'), async (req, res) => {
         .save(outputPath);
 });
 
-app.listen(3000, () => console.log('Audio Studio running on port 3000'));
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Audio Studio running on port ${PORT}`));
