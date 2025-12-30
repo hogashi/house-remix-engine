@@ -30,7 +30,6 @@ const getBeatMap = (buffer) => {
         context.decodeAudioData(buffer, (audioBuffer) => {
             const data = audioBuffer.getChannelData(0); // Use Mono for detection
             const mt = new MusicTempo(data);
-            // mt.beats is an array of timestamps where beats occur
             resolve(mt.beats);
         }, reject);
     });
@@ -58,18 +57,15 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
         let filterChain = [];
         let concatInputs = [];
 
-        // Build a dynamic stretch filter for every detected beat interval
         for (let i = 0; i < beats.length - 1; i++) {
             const start = beats[i];
             const originalDuration = beats[i + 1] - start;
             
-            // Handle edge case where tempo might be too fast/slow for atempo filter (0.5 to 2.0)
             let ratio = originalDuration / targetBeatDuration;
             ratio = Math.max(0.5, Math.min(2.0, ratio));
 
             const label = `b${i}`;
             
-            // Trim the specific beat
             filterChain.push({
                 filter: 'atrim',
                 options: { start: start, duration: originalDuration },
@@ -77,7 +73,6 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
                 outputs: `t${label}`
             });
 
-            // Stretch the beat to the grid
             filterChain.push({
                 filter: 'atempo',
                 options: ratio,
@@ -88,7 +83,6 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
             concatInputs.push(label);
         }
 
-        // Stitch the beats back together
         filterChain.push({
             filter: 'concat',
             options: { n: concatInputs.length, v: 0, a: 1 },
@@ -98,7 +92,6 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
         ffmpeg(inputPath)
             .complexFilter(filterChain, 'fixed_audio')
-            .on('start', (cmd) => console.log('Quantizing with detected beats...'))
             .on('end', () => {
                 res.download(outputPath, () => {
                     fs.unlinkSync(inputPath);
@@ -120,7 +113,7 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
 /**
  * PRODUCT 2: REMIXER
- * Full House production: Warping + High-Pass + Sidechain + Drum Layering.
+ * Fixed: Now correctly uses the song's duration and ensures drums loop properly.
  */
 app.post('/remix', upload.single('song'), async (req, res) => {
     const inputPath = req.file.path;
@@ -129,29 +122,56 @@ app.post('/remix', upload.single('song'), async (req, res) => {
 
     if (!fs.existsSync(drumPath)) return res.status(500).send("Drum loop missing in ./assets/drums.wav");
 
-    ffmpeg()
-        .input(inputPath)
-        .input(drumPath)
-        .inputOptions(['-stream_loop -1'])
-        .complexFilter([
-            { filter: 'highpass', options: { f: 200 }, inputs: '0:a', outputs: 'hpf' },
-            { 
-              filter: 'sidechaincompress', 
-              options: { threshold: 0.1, ratio: 12, release: 120 }, 
-              inputs: ['hpf', '1:a'], 
-              outputs: 'ducked' 
-            },
-            { filter: 'amix', options: { inputs: 2, duration: 'first' }, inputs: ['ducked', '1:a'] }
-        ])
-        .audioBitrate('192k')
-        .on('end', () => {
-            res.download(outputPath, () => {
-                fs.unlinkSync(inputPath);
-                fs.unlinkSync(outputPath);
-            });
-        })
-        .on('error', (err) => res.status(500).send(err.message))
-        .save(outputPath);
+    // We first probe the input to get the exact duration to force the output length
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+        if (err) return res.status(500).send("Could not probe file.");
+        
+        const duration = metadata.format.duration;
+
+        ffmpeg()
+            .input(inputPath)
+            // The -stream_loop -1 must come BEFORE the input to work correctly in all versions
+            .input(drumPath)
+            .inputOptions(['-stream_loop -1'])
+            .complexFilter([
+                // 1. Highpass original song
+                { 
+                    filter: 'highpass', 
+                    options: { f: 200 }, 
+                    inputs: '0:a', 
+                    outputs: 'hpf' 
+                },
+                // 2. Sidechain: Duck the hpf song based on the drum's volume
+                { 
+                  filter: 'sidechaincompress', 
+                  options: { threshold: 0.1, ratio: 12, attack: 5, release: 120 }, 
+                  inputs: ['hpf', '1:a'], 
+                  outputs: 'ducked' 
+                },
+                // 3. Mix ducked song with the drums
+                // We set duration to 'shortest' but we loop the drums infinitely, 
+                // so we use -t (duration) on the output to match the original song exactly.
+                { 
+                    filter: 'amix', 
+                    options: { inputs: 2, duration: 'shortest' }, 
+                    inputs: ['ducked', '1:a'] 
+                }
+            ])
+            .duration(duration) // Explicitly force the output to match the input song's length
+            .audioBitrate('192k')
+            .on('end', () => {
+                res.download(outputPath, () => {
+                    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+                });
+            })
+            .on('error', (err) => {
+                console.error(err);
+                res.status(500).send(err.message);
+                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            })
+            .save(outputPath);
+    });
 });
 
 const PORT = 3000;
