@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NodeJS House Remix Studio</title>
+    <title>Audio Utility Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @keyframes pulse-red {
@@ -11,13 +11,17 @@
             50% { opacity: 0.5; }
         }
         .processing { animation: pulse-red 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .tab-active { border-bottom: 2px solid #f43f5e; color: #f43f5e; }
     </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen flex flex-col items-center justify-center p-4">
     <div class="max-w-md w-full bg-zinc-900 border border-zinc-800 rounded-2xl p-8 shadow-2xl">
-        <header class="mb-8 text-center">
-            <h1 class="text-3xl font-black tracking-tighter text-rose-500 mb-2">HOUSE REMIXER</h1>
-            <p class="text-zinc-400 text-sm">Convert any song into a 126 BPM House track with sidechain pumping and bass management.</p>
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-black tracking-tighter text-rose-500 mb-2">AUDIO STUDIO</h1>
+            <div class="flex justify-center space-x-6 text-xs font-bold uppercase tracking-widest mt-4">
+                <button id="tabBpm" class="pb-2 tab-active transition-all">BPM Fixer</button>
+                <button id="tabRemix" class="pb-2 text-zinc-500 hover:text-zinc-300 transition-all">Remixer</button>
+            </div>
         </header>
 
         <div id="dropZone" class="border-2 border-dashed border-zinc-700 rounded-xl p-10 flex flex-col items-center justify-center transition-all hover:border-rose-500 hover:bg-zinc-800/50 cursor-pointer">
@@ -29,14 +33,22 @@
         </div>
 
         <div class="mt-8 space-y-4">
+            <div id="bpmOptions" class="bg-zinc-800/50 p-4 rounded-lg border border-zinc-800">
+                <label class="text-[10px] uppercase font-bold text-zinc-500 mb-2 block">Target Tempo</label>
+                <div class="flex items-center space-x-3">
+                    <input type="number" id="targetBpm" value="126" class="bg-zinc-900 border border-zinc-700 rounded p-2 w-20 text-rose-500 font-bold outline-none">
+                    <span class="text-xs text-zinc-400">BPM (Quantized Grid)</span>
+                </div>
+            </div>
+
             <button id="processBtn" class="w-full bg-rose-600 hover:bg-rose-500 disabled:bg-zinc-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-rose-900/20">
-                GENERATE REMIX
+                FIX BPM & EXPORT
             </button>
             
             <div id="statusContainer" class="hidden text-center space-y-3">
                 <div class="flex items-center justify-center space-x-2">
                     <div class="w-2 h-2 bg-rose-500 rounded-full processing"></div>
-                    <span id="statusText" class="text-xs uppercase tracking-widest text-zinc-400 font-bold">Analysing Tempo...</span>
+                    <span id="statusText" class="text-xs uppercase tracking-widest text-zinc-400 font-bold">Analysing...</span>
                 </div>
                 <div class="w-full bg-zinc-800 rounded-full h-1.5">
                     <div id="progressBar" class="bg-rose-500 h-1.5 rounded-full transition-all duration-500" style="width: 0%"></div>
@@ -45,21 +57,43 @@
         </div>
 
         <footer class="mt-8 pt-6 border-t border-zinc-800 text-center">
-            <p class="text-[10px] text-zinc-500 uppercase tracking-widest">Powered by Node.js & FFmpeg</p>
+            <p id="modeDesc" class="text-[10px] text-zinc-500 uppercase tracking-widest">Mode: BPM Fixer (Clean Warp)</p>
         </footer>
     </div>
 
     <script>
-        const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('fileInput');
-        const fileName = document.getElementById('fileName');
+        let currentMode = 'bpm'; // 'bpm' or 'remix'
+        const tabBpm = document.getElementById('tabBpm');
+        const tabRemix = document.getElementById('tabRemix');
         const processBtn = document.getElementById('processBtn');
+        const modeDesc = document.getElementById('modeDesc');
+        const fileInput = document.getElementById('fileInput');
+        
+        // Tab Logic
+        tabBpm.onclick = () => {
+            currentMode = 'bpm';
+            tabBpm.className = 'pb-2 tab-active transition-all';
+            tabRemix.className = 'pb-2 text-zinc-500 hover:text-zinc-300 transition-all';
+            processBtn.innerText = "FIX BPM & EXPORT";
+            modeDesc.innerText = "Mode: BPM Fixer (Clean Warp)";
+        };
+
+        tabRemix.onclick = () => {
+            currentMode = 'remix';
+            tabRemix.className = 'pb-2 tab-active transition-all';
+            tabBpm.className = 'pb-2 text-zinc-500 hover:text-zinc-300 transition-all';
+            processBtn.innerText = "GENERATE HOUSE REMIX";
+            modeDesc.innerText = "Mode: Remixer (Warp + Sidechain + Drums)";
+        };
+
+        // UI Helpers
+        const dropZone = document.getElementById('dropZone');
+        const fileName = document.getElementById('fileName');
         const statusContainer = document.getElementById('statusContainer');
         const statusText = document.getElementById('statusText');
         const progressBar = document.getElementById('progressBar');
 
         dropZone.onclick = () => fileInput.click();
-        
         fileInput.onchange = () => {
             if(fileInput.files[0]) {
                 fileName.innerText = fileInput.files[0].name;
@@ -69,25 +103,24 @@
 
         processBtn.onclick = async () => {
             const file = fileInput.files[0];
+            const bpm = document.getElementById('targetBpm').value;
             if(!file) return alert("Select a song first!");
 
             const formData = new FormData();
             formData.append('song', file);
+            formData.append('targetBpm', bpm);
 
-            // UI State
             processBtn.disabled = true;
             statusContainer.classList.remove('hidden');
-            updateStatus("Slicing & Aligning...", 20);
+            updateStatus("Initializing Audio Engine...", 10);
 
             try {
-                const response = await fetch('/remix', {
-                    method: 'POST',
-                    body: formData
-                });
+                const endpoint = currentMode === 'bpm' ? '/fix-bpm' : '/remix';
+                const response = await fetch(endpoint, { method: 'POST', body: formData });
 
                 if (!response.ok) throw new Error('Processing error');
 
-                updateStatus("Applying Sidechain...", 70);
+                updateStatus(currentMode === 'bpm' ? "Quantizing Audio..." : "Layering House Elements...", 60);
                 
                 const blob = await response.blob();
                 updateStatus("Finalizing...", 100);
@@ -95,12 +128,12 @@
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `house-remix-${Date.now()}.mp3`;
+                a.download = `${currentMode}-output-${Date.now()}.mp3`;
                 document.body.appendChild(a);
                 a.click();
                 
                 setTimeout(() => {
-                    statusText.innerText = "REMIX COMPLETE";
+                    statusText.innerText = "PROCESS COMPLETE";
                     processBtn.disabled = false;
                 }, 1000);
 
