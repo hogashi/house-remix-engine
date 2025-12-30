@@ -21,7 +21,7 @@ dirs.forEach(dir => { if (!fs.existsSync(dir)) fs.mkdirSync(dir); });
  */
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'house-remix-engine.html'));
 });
 
 app.post('/remix', upload.single('song'), async (req, res) => {
