@@ -53,44 +53,35 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
             throw new Error("Could not detect enough beats to quantize.");
         }
 
+        console.log(`Detected ${beats.length} beats, processing all beats`);
+
         let filterChain = [];
         let concatInputs = [];
 
-        // Limit the number of beats if the file is massive to prevent command-line length errors
-        const maxBeats = Math.min(beats.length - 1, 400); 
-
-        for (let i = 0; i < maxBeats; i++) {
+        // Build a dynamic stretch filter for every detected beat interval
+        for (let i = 0; i < beats.length - 1; i++) {
             const start = beats[i];
             const originalDuration = beats[i + 1] - start;
-            
+
+            // Handle edge case where tempo might be too fast/slow for atempo filter (0.5 to 2.0)
             let ratio = originalDuration / targetBeatDuration;
-            // Ratio is Original/Target. atempo expects Target/Original logic for speed? 
-            // Actually atempo 2.0 means 2x speed. 
-            // If originalDuration is 0.5 and target is 0.47, we need to speed up (ratio > 1).
-            const speedFactor = originalDuration / targetBeatDuration;
-            const finalSpeed = Math.max(0.5, Math.min(2.0, speedFactor));
+            ratio = Math.max(0.5, Math.min(2.0, ratio));
 
             const label = `b${i}`;
-            
-            // TRIM -> STRETCH -> RESET TIMESTAMPS (Critical for concat)
+
+            // Trim the specific beat
             filterChain.push({
                 filter: 'atrim',
                 options: { start: start, duration: originalDuration },
                 inputs: '0:a',
-                outputs: `trim${label}`
+                outputs: `t${label}`
             });
 
+            // Stretch the beat to the grid
             filterChain.push({
                 filter: 'atempo',
-                options: finalSpeed,
-                inputs: `trim${label}`,
-                outputs: `stretch${label}`
-            });
-
-            filterChain.push({
-                filter: 'asetpts',
-                options: 'NTS',
-                inputs: `stretch${label}`,
+                options: ratio,
+                inputs: `t${label}`,
                 outputs: label
             });
 
@@ -108,7 +99,7 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
             .complexFilter(filterChain, 'fixed_audio')
             .outputOptions(['-vn'])
             .audioBitrate('192k')
-            .on('start', (cmd) => console.log('Quantizing with timestamp sync...'))
+            .on('start', (cmd) => console.log('Quantizing with detected beats...'))
             .on('end', () => {
                 res.download(outputPath);
                 // Keep files for inspection - don't delete
