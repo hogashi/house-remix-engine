@@ -154,7 +154,7 @@ app.post('/remix', upload.single('song'), async (req, res) => {
                   inputs: ['hpf', '1:a'], 
                   outputs: 'ducked' 
                 },
-                { filter: 'amix', options: { inputs: 2, duration: 'shortest' }, inputs: ['ducked', '1:a'] }
+                { filter: 'amix', options: { inputs: 2, duration: 'first' }, inputs: ['ducked', '1:a'] }
             ])
             .duration(duration)
             .audioBitrate('192k')
