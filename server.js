@@ -22,13 +22,12 @@ app.get('/', (req, res) => {
 
 /**
  * HELPER: Automated Beat Mapping
- * Analyzes an audio buffer to find beat timestamps.
  */
 const getBeatMap = (buffer) => {
     return new Promise((resolve, reject) => {
         const context = new AudioContext();
         context.decodeAudioData(buffer, (audioBuffer) => {
-            const data = audioBuffer.getChannelData(0); // Use Mono for detection
+            const data = audioBuffer.getChannelData(0); 
             const mt = new MusicTempo(data);
             resolve(mt.beats);
         }, reject);
@@ -37,7 +36,7 @@ const getBeatMap = (buffer) => {
 
 /**
  * PRODUCT 1: BPM FIXER (Quantization Engine)
- * Now uses REAL beat detection and dynamic slicing.
+ * FIXED: Added asetpts to ensure concat doesn't fail after the first beat.
  */
 app.post('/fix-bpm', upload.single('song'), async (req, res) => {
     const inputPath = req.file.path;
@@ -57,26 +56,41 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
         let filterChain = [];
         let concatInputs = [];
 
-        for (let i = 0; i < beats.length - 1; i++) {
+        // Limit the number of beats if the file is massive to prevent command-line length errors
+        const maxBeats = Math.min(beats.length - 1, 400); 
+
+        for (let i = 0; i < maxBeats; i++) {
             const start = beats[i];
             const originalDuration = beats[i + 1] - start;
             
             let ratio = originalDuration / targetBeatDuration;
-            ratio = Math.max(0.5, Math.min(2.0, ratio));
+            // Ratio is Original/Target. atempo expects Target/Original logic for speed? 
+            // Actually atempo 2.0 means 2x speed. 
+            // If originalDuration is 0.5 and target is 0.47, we need to speed up (ratio > 1).
+            const speedFactor = originalDuration / targetBeatDuration;
+            const finalSpeed = Math.max(0.5, Math.min(2.0, speedFactor));
 
             const label = `b${i}`;
             
+            // TRIM -> STRETCH -> RESET TIMESTAMPS (Critical for concat)
             filterChain.push({
                 filter: 'atrim',
                 options: { start: start, duration: originalDuration },
                 inputs: '0:a',
-                outputs: `t${label}`
+                outputs: `trim${label}`
             });
 
             filterChain.push({
                 filter: 'atempo',
-                options: ratio,
-                inputs: `t${label}`,
+                options: finalSpeed,
+                inputs: `trim${label}`,
+                outputs: `stretch${label}`
+            });
+
+            filterChain.push({
+                filter: 'asetpts',
+                options: 'NTS',
+                inputs: `stretch${label}`,
                 outputs: label
             });
 
@@ -92,10 +106,12 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
         ffmpeg(inputPath)
             .complexFilter(filterChain, 'fixed_audio')
+            .audioBitrate('192k')
+            .on('start', (cmd) => console.log('Quantizing with timestamp sync...'))
             .on('end', () => {
                 res.download(outputPath, () => {
-                    fs.unlinkSync(inputPath);
-                    fs.unlinkSync(outputPath);
+                    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
                 });
             })
             .on('error', (err) => {
@@ -113,7 +129,6 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
 /**
  * PRODUCT 2: REMIXER
- * Fixed: Now correctly uses the song's duration and ensures drums loop properly.
  */
 app.post('/remix', upload.single('song'), async (req, res) => {
     const inputPath = req.file.path;
@@ -122,7 +137,6 @@ app.post('/remix', upload.single('song'), async (req, res) => {
 
     if (!fs.existsSync(drumPath)) return res.status(500).send("Drum loop missing in ./assets/drums.wav");
 
-    // We first probe the input to get the exact duration to force the output length
     ffmpeg.ffprobe(inputPath, (err, metadata) => {
         if (err) return res.status(500).send("Could not probe file.");
         
@@ -130,34 +144,19 @@ app.post('/remix', upload.single('song'), async (req, res) => {
 
         ffmpeg()
             .input(inputPath)
-            // The -stream_loop -1 must come BEFORE the input to work correctly in all versions
             .input(drumPath)
             .inputOptions(['-stream_loop -1'])
             .complexFilter([
-                // 1. Highpass original song
-                { 
-                    filter: 'highpass', 
-                    options: { f: 200 }, 
-                    inputs: '0:a', 
-                    outputs: 'hpf' 
-                },
-                // 2. Sidechain: Duck the hpf song based on the drum's volume
+                { filter: 'highpass', options: { f: 200 }, inputs: '0:a', outputs: 'hpf' },
                 { 
                   filter: 'sidechaincompress', 
                   options: { threshold: 0.1, ratio: 12, attack: 5, release: 120 }, 
                   inputs: ['hpf', '1:a'], 
                   outputs: 'ducked' 
                 },
-                // 3. Mix ducked song with the drums
-                // We set duration to 'shortest' but we loop the drums infinitely, 
-                // so we use -t (duration) on the output to match the original song exactly.
-                { 
-                    filter: 'amix', 
-                    options: { inputs: 2, duration: 'shortest' }, 
-                    inputs: ['ducked', '1:a'] 
-                }
+                { filter: 'amix', options: { inputs: 2, duration: 'shortest' }, inputs: ['ducked', '1:a'] }
             ])
-            .duration(duration) // Explicitly force the output to match the input song's length
+            .duration(duration)
             .audioBitrate('192k')
             .on('end', () => {
                 res.download(outputPath, () => {
