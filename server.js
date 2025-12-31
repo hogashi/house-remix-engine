@@ -106,18 +106,16 @@ app.post('/fix-bpm', upload.single('song'), async (req, res) => {
 
         ffmpeg(inputPath)
             .complexFilter(filterChain, 'fixed_audio')
+            .outputOptions(['-vn'])
             .audioBitrate('192k')
             .on('start', (cmd) => console.log('Quantizing with timestamp sync...'))
             .on('end', () => {
-                res.download(outputPath, () => {
-                    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                });
+                res.download(outputPath);
+                // Keep files for inspection - don't delete
             })
             .on('error', (err) => {
                 console.error(err);
                 res.status(500).send("Quantization failed: " + err.message);
-                if(fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             })
             .save(outputPath);
 
@@ -145,29 +143,28 @@ app.post('/remix', upload.single('song'), async (req, res) => {
         ffmpeg()
             .input(inputPath)
             .input(drumPath)
-            .inputOptions(['-stream_loop -1'])
+            .inputOptions(['-stream_loop', '-1'])
             .complexFilter([
                 { filter: 'highpass', options: { f: 200 }, inputs: '0:a', outputs: 'hpf' },
-                { 
-                  filter: 'sidechaincompress', 
-                  options: { threshold: 0.1, ratio: 12, attack: 5, release: 120 }, 
-                  inputs: ['hpf', '1:a'], 
-                  outputs: 'ducked' 
+                {
+                  filter: 'sidechaincompress',
+                  options: { threshold: 0.1, ratio: 12, attack: 5, release: 120 },
+                  inputs: ['hpf', '1:a'],
+                  outputs: 'ducked'
                 },
                 { filter: 'amix', options: { inputs: 2, duration: 'first' }, inputs: ['ducked', '1:a'] }
             ])
+            .outputOptions(['-vn'])
             .duration(duration)
             .audioBitrate('192k')
+            .on('start', (cmd) => console.log('FFmpeg command:', cmd))
             .on('end', () => {
-                res.download(outputPath, () => {
-                    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                });
+                res.download(outputPath);
+                // Keep files for inspection - don't delete
             })
             .on('error', (err) => {
                 console.error(err);
                 res.status(500).send(err.message);
-                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             })
             .save(outputPath);
     });
